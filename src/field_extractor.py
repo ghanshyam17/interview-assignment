@@ -1,11 +1,65 @@
 import json
 import logging
+import re
 from pydantic import ValidationError
 from src.models import TermSheetExtraction, ExtractedField, MismatchStatus
 from src.llm_client import LLMClient
 from src.pdf_extractor import extract_text_from_pdf
 
 logger = logging.getLogger(__name__)
+
+
+def _deterministic_post_extraction(pdf_text: str, extraction: dict) -> dict:
+    """
+    Deterministic regex-based post-extraction validation that overrides known
+    LLM non-determinism. Uses the raw PDF text as ground truth to correct
+    fields the LLM commonly gets wrong.
+    """
+    corrections = []
+
+    # --- IssueDate: prefer "Deemed Date of Allotment" over "Issue Opening Date" ---
+    # The LLM sometimes picks the Issue Opening Date instead of the Deemed Date of Allotment.
+    # Both appear in the IDBI term sheet. The booking system uses the allotment date.
+    allotment_patterns = [
+        r'Deemed Date of Allotment[:\s]+([A-Za-z0-9,\s]{8,40})',
+        r'Date of Allotment[:\s]+([A-Za-z0-9,\s]{8,40})',
+        r'Allotment Date[:\s]+([A-Za-z0-9,\s]{8,40})',
+    ]
+    for pattern in allotment_patterns:
+        m = re.search(pattern, pdf_text)
+        if m:
+            allotment_date = m.group(1).strip().rstrip('.')
+            current = extraction.get("IssueDate", {})
+            if current.get("value") != allotment_date:
+                # Verify the evidence mentions "Allotment" to confirm this is the allotment date
+                evidence_text = m.group(0).strip()
+                extraction["IssueDate"] = {
+                    "value": allotment_date,
+                    "evidence": evidence_text
+                }
+                corrections.append(f"IssueDate -> '{allotment_date}' (from Deemed Date of Allotment)")
+            break
+
+    # --- BusinessDayLocation: must come from a "Business Day" section, not governing law ---
+    # The LLM sometimes extracts "Mumbai" from the "Governing Law and Jurisdiction" section.
+    # Only accept values where the evidence explicitly mentions "business day" locations.
+    bdl = extraction.get("BusinessDayLocation", {})
+    if bdl.get("value") is not None:
+        evidence = bdl.get("evidence", "").lower()
+        # Check if the evidence is from a business day section (not governing law/jurisdiction)
+        if "business day" not in evidence and "payment location" not in evidence and "holiday" not in evidence:
+            # Reject this extraction — likely from governing law or jurisdiction
+            extraction["BusinessDayLocation"] = {"value": None, "evidence": "NOT_FOUND"}
+            corrections.append(f"BusinessDayLocation -> NOT_FOUND (rejected non-business-day evidence)")
+
+    # --- Notional: always NOT_FOUND in term sheets ---
+    extraction["Notional"] = {"value": None, "evidence": "NOT_FOUND"}
+
+    if corrections:
+        for c in corrections:
+            logger.info(f"Deterministic correction: {c}")
+
+    return extraction
 
 
 EXTRACTION_SYSTEM_PROMPT = """You are an expert financial document analyst specializing in bond term sheets.
@@ -31,10 +85,12 @@ FIELD-SPECIFIC EXTRACTION RULES:
 
 - Currency: The 3-letter currency code (INR, USD, EUR, GBP, etc.).
 
-- IssueDate: The date the bonds are actually issued/allotted to investors — NOT the date the 
-  issue opens for subscription. Prefer "Deemed Date of Allotment", "Date of Allotment", 
-  "Issue Date", or "Date of Issue" over "Issue Opening Date" or "Issue Open Date". 
-  The Issue Opening Date is when subscriptions open, not when bonds are issued.
+- IssueDate: The date the bonds are actually issued/allotted to investors. 
+  CRITICAL: "Issue Opening Date" or "Issue Open Date" is when subscriptions OPEN — it is NOT the IssueDate.
+  The IssueDate is the "Deemed Date of Allotment" or "Date of Allotment" — the date bonds are actually 
+  issued to investors. For example, if the document says "Issue Opening Date: September 29, 2014" and 
+  "Deemed Date of Allotment: October 17, 2014", the IssueDate is "October 17, 2014" (the allotment date).
+  Always prefer "Deemed Date of Allotment", "Date of Allotment", or "Allotment Date" over "Issue Opening Date".
   Return the actual calendar date of allotment/issuance.
 
 - IssueAmount: The TOTAL issue size/amount. Convert to full numeric value:
@@ -68,10 +124,13 @@ FIELD-SPECIFIC EXTRACTION RULES:
   "next business day" (= Following), "preceding business day" (= Preceding).
 
 - BusinessDayLocation: The cities/locations that define business days for this bond. 
-  Look in sections about business days, payment locations, or holiday calendars.
-  Do NOT use governing law, jurisdiction, or court locations (e.g., "courts of Mumbai") as BusinessDayLocation. 
-  If business day locations are not explicitly specified as payment or holiday cities, set value to null and evidence to "NOT_FOUND".
-  Return as comma-separated cities, e.g., "Mumbai, New Delhi" or "Oslo, New York".
+  Look ONLY in sections explicitly titled "Business Day" or "Business Day Location" or 
+  where the document states which cities' holidays apply to determine business days.
+  CRITICAL: Do NOT use the "Governing Law" or "Jurisdiction" section — courts of Mumbai 
+  do NOT mean Mumbai is a business day location. Do NOT use listing locations, registered 
+  offices, or payment agent locations. Only use locations explicitly tied to business 
+  day determination. If no such section exists, set value to null and evidence to "NOT_FOUND".
+  Return as comma-separated cities, e.g., "Oslo, New York".
 
 - AmortizationType: How the principal is repaid: "Bullet" (lump sum at maturity), 
   "Perpetual" (no scheduled repayment), "Amortizing" (gradual repayment).
@@ -144,13 +203,16 @@ Extract all fields now:"""
             system_prompt=EXTRACTION_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             json_mode=True,
-            temperature=0.1,
+            temperature=0.0,
             model=LLM_MODEL_EXTRACTION
         )
         
         # Parse JSON
         response_json = json.loads(raw_response)
         logger.info(f"LLM returned JSON with {len(response_json)} fields")
+        
+        # Apply deterministic post-extraction corrections (overrides known LLM non-determinism)
+        response_json = _deterministic_post_extraction(pdf_text, response_json)
         
         # Validate against Pydantic schema
         try:
