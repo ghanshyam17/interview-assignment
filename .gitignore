@@ -1,0 +1,16 @@
+# Environment
+.env
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+
+# Generated output
+output/
+
+# Debug dumps
+genel_text.txt
+idbi_text.txt
+run_output.txt
