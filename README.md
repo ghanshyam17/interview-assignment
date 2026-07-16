@@ -95,12 +95,6 @@ This executes the complete end-to-end workflow:
 6. Send any mismatches to the LLM for Pass 2 false alert analysis.
 7. Generate reconciliation reports under `output/`.
 
-### Interactive walkthrough (Jupyter Notebook)
-For a step-by-step walkthrough of the entire pipeline with inline explanations:
-```bash
-jupyter notebook Reconciliation_Walkthrough.ipynb
-```
-
 ### Running the test suite
 Smoke tests verify pipeline components (PDF extractor, booking ingestor, normalizers):
 ```bash
@@ -180,10 +174,7 @@ Booking Files (CSV/JSON) ──pandas──▶ Normalized Trades ◀────
 > 4. **Deterministic LLM Adjudication Caching:** To prevent non-deterministic API responses for identical discrepancies across multiple trades (e.g., repeating the same maturity discrepancy across 5 trades), Pass 2 caches adjudication results using a `(field_name, term_sheet_value, booking_value)` key. This guarantees perfect output consistency, reduces API costs, and accelerates execution.
 > 5. **Free-tier compliance:** The solution uses only Groq's free-tier API — no paid API keys required, satisfying the assignment constraint. All LLM interactions are fully automated via Python code.
 
-## Documentation
-
 - **`REPORT.md`** — Technical report (max 2 pages): workflow architecture, LLM/API integration design, field extraction design, challenges, assumptions, and DevOps/productionization recommendations.
-- **`Reconciliation_Walkthrough.ipynb`** — Interactive Jupyter Notebook walkthrough of the full pipeline.
 
 ## Project Structure
 
@@ -193,7 +184,6 @@ Booking Files (CSV/JSON) ──pandas──▶ Normalized Trades ◀────
 requirements.txt                # Python dependencies
 README.md                       # This file
 REPORT.md                       # Technical report (assignment documentation)
-Reconciliation_Walkthrough.ipynb # Interactive walkthrough notebook
 config.py                       # Configuration: API keys, model, file mappings, reconcile fields
 main.py                         # Main pipeline orchestration entrypoint
 src/
