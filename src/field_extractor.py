@@ -31,8 +31,11 @@ FIELD-SPECIFIC EXTRACTION RULES:
 
 - Currency: The 3-letter currency code (INR, USD, EUR, GBP, etc.).
 
-- IssueDate: The date of issuance. Look for "Issue Date", "Deemed Date of Allotment", 
-  "Date of Issue", or similar terms. Return the actual calendar date.
+- IssueDate: The date the bonds are actually issued/allotted to investors — NOT the date the 
+  issue opens for subscription. Prefer "Deemed Date of Allotment", "Date of Allotment", 
+  "Issue Date", or "Date of Issue" over "Issue Opening Date" or "Issue Open Date". 
+  The Issue Opening Date is when subscriptions open, not when bonds are issued.
+  Return the actual calendar date of allotment/issuance.
 
 - IssueAmount: The TOTAL issue size/amount. Convert to full numeric value:
   * Indian notation: Rs. 1,500 Crores = 15000000000 (1500 × 10000000)
