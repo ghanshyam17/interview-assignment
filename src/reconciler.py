@@ -186,8 +186,8 @@ def compare_fields(
             ts_value = ts_field.get("value") if isinstance(ts_field, dict) else None
             ts_evidence = ts_field.get("evidence", "") if isinstance(ts_field, dict) else ""
             
-            # Check for missing fields in term sheet
-            if ts_value is None and ts_evidence == "NOT_FOUND":
+            # Check for missing fields in term sheet (either explicitly NOT_FOUND or simply absent)
+            if ts_value is None:
                 booking_val = trade.get(field_name)
                 # If SettlementDate is missing in term sheet, check if it matches the IssueDate of the term sheet
                 if field_name == "SettlementDate":
@@ -311,10 +311,10 @@ def compare_fields(
                 continue
             
             # Programmatic list/delimiter normalization for location-type fields
-            if field_name in ["BusinessDayLocation"] and ts_norm is not None and bk_norm is not None:
-                # Normalize different delimiters: pipe, comma, semicolon
-                ts_parts = sorted(set(p.strip() for p in re.split(r'[|,;]+', ts_norm) if p.strip()))
-                bk_parts = sorted(set(p.strip() for p in re.split(r'[|,;]+', bk_norm) if p.strip()))
+            # Split on ORIGINAL values (before normalize_string strips commas) so both sides use the same delimiter set
+            if field_name in ["BusinessDayLocation"] and ts_value is not None and booking_value is not None:
+                ts_parts = sorted(set(p.strip().lower() for p in re.split(r'[|,;]+', str(ts_value)) if p.strip()))
+                bk_parts = sorted(set(p.strip().lower() for p in re.split(r'[|,;]+', str(booking_value)) if p.strip()))
                 if ts_parts == bk_parts:
                     ts_norm = '|'.join(ts_parts)
                     bk_norm = '|'.join(bk_parts)
@@ -443,8 +443,17 @@ Is this a True Mismatch or a False Alert? Return only JSON."""
             
             llm_result = json.loads(raw_response)
             
+            # Normalize status to canonical values (LLM may return casing variants)
+            raw_status = str(llm_result.get("status", "True Mismatch")).strip().lower()
+            if "false" in raw_status and "alert" in raw_status:
+                canonical_status = "False Alert"
+            elif "true" in raw_status and "mismatch" in raw_status:
+                canonical_status = "True Mismatch"
+            else:
+                canonical_status = "True Mismatch"  # Conservative default for unrecognized responses
+            
             # Update the mismatch with LLM analysis
-            mismatch["status"] = llm_result.get("status", "True Mismatch")
+            mismatch["status"] = canonical_status
             mismatch["reason"] = llm_result.get("reason", "No reason provided")
             mismatch["llm_analysis"] = json.dumps(llm_result, indent=2)
             
