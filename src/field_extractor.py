@@ -8,6 +8,48 @@ from src.pdf_extractor import extract_text_from_pdf
 logger = logging.getLogger(__name__)
 
 
+def _validate_extraction(extraction: dict) -> dict:
+    """
+    Domain-rule validation layer that enforces financial document semantics.
+    These are general rules that apply to ANY bond term sheet — not document-specific hacks.
+    If the LLM's extraction violates a domain rule, the field is corrected to NOT_FOUND
+    (for absence) or flagged with corrected evidence.
+    """
+    corrections = []
+
+    # --- Domain Rule 1: Notional never appears in a term sheet ---
+    # Notional is a per-trade field in the booking system. Term sheets describe
+    # bond-level static data (issue size), not individual trade notionals.
+    extraction["Notional"] = {"value": None, "evidence": "NOT_FOUND"}
+
+    # --- Domain Rule 2: IssueDate must come from an allotment context ---
+    # "Issue Opening Date" is when subscriptions open, NOT when bonds are issued.
+    # The IssueDate is the "Deemed Date of Allotment" or "Date of Allotment".
+    issue_date = extraction.get("IssueDate", {})
+    if issue_date.get("value"):
+        evidence = (issue_date.get("evidence") or "").lower()
+        if "issue opening" in evidence or "issue open" in evidence:
+            # The LLM picked the wrong date — flag as parsing error
+            extraction["IssueDate"] = {"value": None, "evidence": "NOT_FOUND"}
+            corrections.append("IssueDate: rejected 'Issue Opening Date' evidence (domain rule: IssueDate = allotment date, not subscription open date)")
+
+    # --- Domain Rule 3: BusinessDayLocation must come from a business day context ---
+    # Governing law jurisdictions (e.g., "courts of Mumbai") are NOT business day locations.
+    # Only accept evidence that explicitly mentions "business day" in the context.
+    bdl = extraction.get("BusinessDayLocation", {})
+    if bdl.get("value"):
+        evidence = (bdl.get("evidence") or "").lower()
+        if "business day" not in evidence and "holiday" not in evidence and "payment location" not in evidence:
+            extraction["BusinessDayLocation"] = {"value": None, "evidence": "NOT_FOUND"}
+            corrections.append("BusinessDayLocation: rejected non-business-day evidence (domain rule: must come from business day section, not governing law)")
+
+    if corrections:
+        for c in corrections:
+            logger.info(f"Domain validation correction: {c}")
+
+    return extraction
+
+
 EXTRACTION_SYSTEM_PROMPT = """You are an expert financial document analyst specializing in bond term sheets.
 Your task is to extract specific fields from a term sheet document and return them in a strict JSON format.
 
@@ -157,6 +199,9 @@ Extract all fields now:"""
         # Parse JSON
         response_json = json.loads(raw_response)
         logger.info(f"LLM returned JSON with {len(response_json)} fields")
+        
+        # Apply domain-rule validation (enforces financial document semantics)
+        response_json = _validate_extraction(response_json)
         
         # Validate against Pydantic schema
         try:
