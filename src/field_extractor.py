@@ -1,65 +1,11 @@
 import json
 import logging
-import re
 from pydantic import ValidationError
 from src.models import TermSheetExtraction, ExtractedField, MismatchStatus
 from src.llm_client import LLMClient
 from src.pdf_extractor import extract_text_from_pdf
 
 logger = logging.getLogger(__name__)
-
-
-def _deterministic_post_extraction(pdf_text: str, extraction: dict) -> dict:
-    """
-    Deterministic regex-based post-extraction validation that overrides known
-    LLM non-determinism. Uses the raw PDF text as ground truth to correct
-    fields the LLM commonly gets wrong.
-    """
-    corrections = []
-
-    # --- IssueDate: prefer "Deemed Date of Allotment" over "Issue Opening Date" ---
-    # The LLM sometimes picks the Issue Opening Date instead of the Deemed Date of Allotment.
-    # Both appear in the IDBI term sheet. The booking system uses the allotment date.
-    allotment_patterns = [
-        r'Deemed Date of Allotment[:\s]+([A-Za-z0-9,\s]{8,40})',
-        r'Date of Allotment[:\s]+([A-Za-z0-9,\s]{8,40})',
-        r'Allotment Date[:\s]+([A-Za-z0-9,\s]{8,40})',
-    ]
-    for pattern in allotment_patterns:
-        m = re.search(pattern, pdf_text)
-        if m:
-            allotment_date = m.group(1).strip().rstrip('.')
-            current = extraction.get("IssueDate", {})
-            if current.get("value") != allotment_date:
-                # Verify the evidence mentions "Allotment" to confirm this is the allotment date
-                evidence_text = m.group(0).strip()
-                extraction["IssueDate"] = {
-                    "value": allotment_date,
-                    "evidence": evidence_text
-                }
-                corrections.append(f"IssueDate -> '{allotment_date}' (from Deemed Date of Allotment)")
-            break
-
-    # --- BusinessDayLocation: must come from a "Business Day" section, not governing law ---
-    # The LLM sometimes extracts "Mumbai" from the "Governing Law and Jurisdiction" section.
-    # Only accept values where the evidence explicitly mentions "business day" locations.
-    bdl = extraction.get("BusinessDayLocation", {})
-    if bdl.get("value") is not None:
-        evidence = bdl.get("evidence", "").lower()
-        # Check if the evidence is from a business day section (not governing law/jurisdiction)
-        if "business day" not in evidence and "payment location" not in evidence and "holiday" not in evidence:
-            # Reject this extraction — likely from governing law or jurisdiction
-            extraction["BusinessDayLocation"] = {"value": None, "evidence": "NOT_FOUND"}
-            corrections.append(f"BusinessDayLocation -> NOT_FOUND (rejected non-business-day evidence)")
-
-    # --- Notional: always NOT_FOUND in term sheets ---
-    extraction["Notional"] = {"value": None, "evidence": "NOT_FOUND"}
-
-    if corrections:
-        for c in corrections:
-            logger.info(f"Deterministic correction: {c}")
-
-    return extraction
 
 
 EXTRACTION_SYSTEM_PROMPT = """You are an expert financial document analyst specializing in bond term sheets.
@@ -122,6 +68,7 @@ FIELD-SPECIFIC EXTRACTION RULES:
 - BusinessDayConvention: The business day adjustment rule. Look for terms like "Following", 
   "Modified Following", "Preceding", "Unadjusted", or descriptions like 
   "next business day" (= Following), "preceding business day" (= Preceding).
+  This is typically found in a section titled "Business Day Convention".
 
 - BusinessDayLocation: The cities/locations that define business days for this bond. 
   Look ONLY in sections explicitly titled "Business Day" or "Business Day Location" or 
@@ -211,9 +158,6 @@ Extract all fields now:"""
         response_json = json.loads(raw_response)
         logger.info(f"LLM returned JSON with {len(response_json)} fields")
         
-        # Apply deterministic post-extraction corrections (overrides known LLM non-determinism)
-        response_json = _deterministic_post_extraction(pdf_text, response_json)
-        
         # Validate against Pydantic schema
         try:
             validated = TermSheetExtraction(**response_json)
@@ -260,9 +204,9 @@ Extract all fields now:"""
             "errors": [{"field": "json_parse", "error": str(je), "type": "json_error"}]
         }
     except Exception as e:
-        logger.error(f"Extraction failed: {str(e)}")
+        logger.error(f"Extraction failed: {e}")
         return {
             "status": "failed",
             "data": {},
-            "errors": [{"field": "general", "error": str(e), "type": "general_error"}]
+            "errors": [{"field": "unknown", "error": str(e), "type": "unknown_error"}]
         }
